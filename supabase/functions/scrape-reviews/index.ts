@@ -3,6 +3,8 @@
 import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { DOMParser, Element } from "https://deno.land/x/deno_dom@v0.1.45/deno-dom-wasm.ts";
+import { chromium, Browser as PlaywrightBrowser } from "npm:playwright-core"; // Renamed Browser to PlaywrightBrowser to avoid conflict
+import { Browserbase } from "npm:@browserbasehq/sdk";
 
 // Define the structure of a review
 interface Review {
@@ -47,52 +49,78 @@ function getAttr(element: Element | null, selector: string, attribute: string): 
 }
 
 async function scrapeSinglePage(url: string): Promise<Review[]> {
-  console.log(`Scraping URL: ${url}`);
-  const headers = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36", // Updated User-Agent (as of June 2024/early 2025)
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Connection": "keep-alive",
-    "Upgrade-Insecure-Requests": "1",
-    "Sec-Fetch-Dest": "document",
-    "Sec-Fetch-Mode": "navigate",
-    "Sec-Fetch-Site": "same-origin",
-    "Sec-Fetch-User": "?1",
-    "TE": "trailers",
-  };
-  const response = await fetch(url, { headers });
+  console.log(`Attempting to scrape URL with Browserbase/Playwright: ${url}`);
 
-  if (!response.ok) {
-    console.error(`Failed to fetch ${url}: ${response.status} ${response.statusText}`);
-    const errorBody = await response.text();
-    console.error(`Error body: ${errorBody}`);
+  const browserbaseApiKey = Deno.env.get("BROWSERBASE_API_KEY");
+  const browserbaseProjectId = Deno.env.get("BROWSERBASE_PROJECT_ID");
+
+  if (!browserbaseApiKey || !browserbaseProjectId) {
+    console.error("Browserbase API Key or Project ID is not set in environment variables.");
     return [];
   }
 
-  const html = await response.text();
+  const bb = new Browserbase({ apiKey: browserbaseApiKey });
+  let playwrightBrowser: PlaywrightBrowser | null = null;
+  let bbSession: any = null;
+
+  let html = "";
+
+  try {
+    console.log("Creating Browserbase session...");
+    bbSession = await bb.sessions.create({ projectId: browserbaseProjectId, region: "us-east-1" }); 
+    console.log(`Browserbase session created. Connect URL: ${bbSession.connectUrl ? 'exists' : 'missing'}`);
+
+    playwrightBrowser = await chromium.connectOverCDP(bbSession.connectUrl, { timeout: 60000 }); 
+    console.log("Connected to Playwright browser over CDP.");
+
+    const context = playwrightBrowser.contexts()[0];
+    const page = context.pages()[0];
+    console.log(`Navigating to ${url}...`);
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 90000 }); 
+    console.log("Navigation complete. Waiting for review cards...");
+
+    await page.waitForSelector('div[data-automation="reviewCard"]', { timeout: 60000 }); 
+    console.log("Review cards detected. Extracting page content...");
+
+    html = await page.content();
+    console.log(`Page content extracted. HTML length: ${html.length}`);
+
+  } catch (e) {
+    console.error(`Playwright/Browserbase error while scraping ${url}:`, e.message, e.stack);
+    return []; 
+  } finally {
+    if (playwrightBrowser) {
+      console.log("Closing Playwright browser connection...");
+      await playwrightBrowser.close().catch(err => console.error("Error closing Playwright browser:", err));
+    }
+    console.log("Scraping for single page finished (or errored).");
+  }
+
+  if (!html) {
+    console.log("No HTML content was retrieved.");
+    return [];
+  }
+  
   const doc = new DOMParser().parseFromString(html, "text/html");
   if (!doc) {
-      console.error("Failed to parse HTML document.");
+      console.error("Failed to parse HTML document with deno-dom.");
       return [];
   }
 
   const reviewCards = doc.querySelectorAll('div[data-automation="reviewCard"]');
   const reviews: Review[] = [];
+  console.log(`Found ${reviewCards.length} review cards in the parsed HTML.`);
 
   for (const card of reviewCards) {
-    const cardElement = card as Element; // Cast once for use with helpers
+    const cardElement = card as Element;
     const review: Partial<Review> = {};
 
-    // Reviewer name and profile link
-    // This one is a bit more complex due to conditional logic on the href and backup selector
     const reviewerTagElement = cardElement.querySelector("div.QIHsu.Zb a, span.JAZVu.sVnOO > a");
     if (reviewerTagElement) {
       review.reviewer_name = reviewerTagElement.textContent.trim();
       const href = reviewerTagElement.getAttribute("href");
       review.reviewer_profile = href ? (href.startsWith("/") ? `${TRIPADVISOR_BASE_URL}${href}` : href) : null;
     } else {
-      // Fallback for reviewer name
       review.reviewer_name = getText(cardElement, "span[class^='ui_header_name']");
       review.reviewer_profile = null;
     }
@@ -100,7 +128,6 @@ async function scrapeSinglePage(url: string): Promise<Review[]> {
     review.avatar_url = getAttr(cardElement, "img[src]", "src");
     review.contributions = getText(cardElement, "div.vYLts span, span.biGQs.fSPVG");
 
-    // Helpful vote count (requires finding the button first)
     const helpfulButton = cardElement.querySelector('button[aria-label*="helpful vote"]');
     if (helpfulButton) {
       review.helpful_votes = getText(helpfulButton as Element, "span[class*='biGQs']");
@@ -108,7 +135,6 @@ async function scrapeSinglePage(url: string): Promise<Review[]> {
       review.helpful_votes = null;
     }
 
-    // Rating from SVG title (requires finding SVG, then title)
     const ratingSvg = cardElement.querySelector("svg[class*='UctUV']");
     if (ratingSvg) {
       const ratingText = getText(ratingSvg as Element, "title");
@@ -124,7 +150,6 @@ async function scrapeSinglePage(url: string): Promise<Review[]> {
 
     review.review_title = getText(cardElement, "div.biGQs._P.fiohW.qWPrE.ncFvv.fOtGX span.yCeTE, div.QZdOXhEy > span");
 
-    // Trip date and type (requires parsing)
     const tripInfoText = getText(cardElement, "div.RpeCd, div.RpeCd span.teHYY._R.Me.Z.bToff");
     if (tripInfoText) {
       const parts = tripInfoText.split("•").map(p => p.trim());
@@ -135,7 +160,6 @@ async function scrapeSinglePage(url: string): Promise<Review[]> {
       review.trip_type = null;
     }
     
-    // Full review text (special handling for replacing multiple spaces)
     let fullText = getText(cardElement, "div.fIrGe._T.bgMZj span.yCeTE, span.QewHA.H4._a");
     if (fullText) {
         review.review_text = fullText.replaceAll(/\s+/g, ' ').trim();
@@ -143,8 +167,6 @@ async function scrapeSinglePage(url: string): Promise<Review[]> {
         review.review_text = null;
     }
 
-
-    // "Review of" information and link (complex due to href conditional)
     const reviewOfTagElement = cardElement.querySelector("div.biGQs._P.pZUbB.xUqsL.mowmC.KxBGd a, div.yPOCb > div > div > a");
     if (reviewOfTagElement) {
         review.review_of = reviewOfTagElement.textContent.trim();
@@ -155,8 +177,6 @@ async function scrapeSinglePage(url: string): Promise<Review[]> {
         review.review_of_link = null;
     }
 
-
-    // Written date and disclaimer (complex due to multiple elements and fallback)
     const treSq = cardElement.querySelector("div.TreSq");
     if (treSq) {
       const infoDivs = treSq.querySelectorAll("div[class*='biGQs'][class*='pZUbB']");
@@ -172,11 +192,10 @@ async function scrapeSinglePage(url: string): Promise<Review[]> {
         review.disclaimer = null;
     }
 
-    // Generate unique_id
     if (review.reviewer_name && review.written_date) {
       review.unique_id = `${review.reviewer_name}_${review.written_date}`.replace(/\s+/g, '_').toLowerCase();
     } else {
-      console.warn("Missing reviewer_name or written_date for unique_id generation for a review on:", url, review);
+      console.warn("Missing reviewer_name or written_date for unique_id generation for a review on:", url);
     }
 
     review.source_url = url;
@@ -191,9 +210,9 @@ serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
     return new Response(null, {
       headers: {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type, Authorization",
+        "Access-Control-Allow-Origin": "*", 
+        "Access-Control-Allow-Methods": "POST, GET, OPTIONS", 
+        "Access-Control-Allow-Headers": "Content-Type, Authorization, apikey, x-client-info", 
       },
     });
   }
@@ -205,6 +224,10 @@ serve(async (req: Request) => {
     if (!supabaseUrl || !supabaseAnonKey) {
       throw new Error("Supabase URL or Anon Key not provided in environment variables.");
     }
+    if (!Deno.env.get("BROWSERBASE_API_KEY") || !Deno.env.get("BROWSERBASE_PROJECT_ID")) {
+        console.error("Browserbase API Key or Project ID is not set. Scraping will fail.");
+    }
+
 
     const supabase = createClient(supabaseUrl, supabaseAnonKey, {
        auth: {
@@ -222,30 +245,32 @@ serve(async (req: Request) => {
 
     let allScrapedReviews: Review[] = [];
     let skip = 0;
-    let page = 0;
-    const MAX_PAGES = 100; // Safety break
+    let pageNum = 0; 
+    const MAX_PAGES = 100; 
 
     console.log("Starting TripAdvisor review scraping process...");
 
-    while (page < MAX_PAGES) {
+    while (pageNum < MAX_PAGES) {
       const paginationToken = skip === 0 ? "" : `or${skip}`;
       const currentUrl = baseUrlTemplate.replace("{PAGINATION_TOKEN}", paginationToken);
       
       const reviewsOnPage = await scrapeSinglePage(currentUrl);
 
       if (reviewsOnPage.length === 0) {
-        console.log(`No more reviews found at page ${page +1} (offset ${skip}). Stopping.`);
+        console.log(`No more reviews found or scraping failed for page ${pageNum +1} (offset ${skip}). Stopping.`);
         break;
       }
 
       allScrapedReviews = allScrapedReviews.concat(reviewsOnPage);
-      skip += reviewsOnPage.length;
-      page++;
-      console.log(`Scraped ${reviewsOnPage.length} reviews from page ${page}. Total scraped: ${allScrapedReviews.length}. Next skip: ${skip}`);
+
+      const reviewsActuallyScrapedThisPage = reviewsOnPage.length;
+      skip += reviewsActuallyScrapedThisPage;
+
+      pageNum++;
+      console.log(`Scraped ${reviewsActuallyScrapedThisPage} reviews from page ${pageNum}. Total scraped: ${allScrapedReviews.length}. Next skip offset: ${skip}`);
       
-      // Consider a delay to be polite to TripAdvisor's servers
-      if (page < MAX_PAGES && reviewsOnPage.length > 0) { // Add delay only if we are continuing
-         await new Promise(resolve => setTimeout(resolve, 500)); // 0.5 second delay
+      if (pageNum < MAX_PAGES && reviewsActuallyScrapedThisPage > 0) {
+         await new Promise(resolve => setTimeout(resolve, 500)); 
       }
     }
 
@@ -286,13 +311,14 @@ serve(async (req: Request) => {
       throw upsertError;
     }
 
-    console.log("Supabase processing successful. Details (if any from select):", upsertData);
+    console.log("Supabase processing successful. Records processed count (may include ignored duplicates):", upsertData?.length || 0);
 
     return new Response(
       JSON.stringify({
         message: "Scraping and Supabase processing completed.",
         scrapedCount: allScrapedReviews.length,
         processedForUpsertCount: reviewsToUpsert.length,
+        supabaseResultCount: upsertData?.length || 0,
       }),
       {
         headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
@@ -301,7 +327,7 @@ serve(async (req: Request) => {
     );
 
   } catch (err) {
-    console.error("Error in Edge Function:", err);
+    console.error("Error in Edge Function:", err.message, err.stack);
     return new Response(String(err?.message ?? err), {
       status: 500,
       headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
