@@ -96,7 +96,7 @@ async function scrapeSinglePage(page: PlaywrightPage, sourceUrl: string): Promis
       review.helpful_votes = null;
     }
 
-    const ratingSvg = cardElement.querySelector("svg[class*='UctUV']");
+    const ratingSvg = cardElement.querySelector("svg[class*='evwcZ']");
     if (ratingSvg) {
       const ratingText = getText(ratingSvg as Element, "title");
       if (ratingText) {
