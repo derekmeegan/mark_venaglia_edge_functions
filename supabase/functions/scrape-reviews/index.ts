@@ -21,9 +21,8 @@ interface Review {
   review_of_link: string | null;
   written_date: string | null;
   disclaimer: string | null;
+  date: string;
   unique_id?: string;
-  source_url?: string;
-  scraped_at?: string;
 }
 
 const TRIPADVISOR_BASE_URL = "https://www.tripadvisor.com";
@@ -160,8 +159,7 @@ async function scrapeSinglePage(page: PlaywrightPage, sourceUrl: string): Promis
       console.warn("Missing reviewer_name or written_date for unique_id generation for a review on:", sourceUrl);
     }
 
-    review.source_url = sourceUrl;
-    review.scraped_at = new Date().toISOString();
+    review.date = new Date().toISOString().substring(0, 10);
 
     reviews.push(review as Review);
   }
