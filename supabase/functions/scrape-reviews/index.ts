@@ -67,7 +67,7 @@ async function scrapeSinglePage(url: string): Promise<Review[]> {
 
   try {
     console.log("Creating Browserbase session...");
-    bbSession = await bb.sessions.create({ projectId: browserbaseProjectId, region: "us-east-1" }); 
+    bbSession = await bb.sessions.create({ projectId: browserbaseProjectId, region: "us-east-1", proxies: true }); 
     console.log(`Browserbase session created. Connect URL: ${bbSession.connectUrl ? 'exists' : 'missing'}`);
 
     playwrightBrowser = await chromium.connectOverCDP(bbSession.connectUrl, { timeout: 60000 }); 
