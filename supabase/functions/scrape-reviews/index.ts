@@ -44,6 +44,23 @@ function getAttr(element: Element | null, selector: string, attribute: string): 
   return selected?.getAttribute(attribute) || null;
 }
 
+function formatDateString(inputStr: string | null | undefined): string {
+    if (!inputStr) {
+        return "";
+    }
+    const datePart = inputStr.replace("Written ", "");
+    const dateObj = new Date(datePart);
+    if (isNaN(dateObj.getTime())) {
+      return "";
+    }
+    const year = dateObj.getFullYear();
+    const month = dateObj.getMonth() + 1; 
+    const day = dateObj.getDate();
+    const formattedMonth = String(month).padStart(2, '0');
+    const formattedDay = String(day).padStart(2, '0');
+    return `${year}-${formattedMonth}-${formattedDay}`;
+  }
+
 async function scrapeSinglePage(page: PlaywrightPage, sourceUrl: string): Promise<Review[]> {
   console.log(`Processing page content for URL: ${sourceUrl}`);
   let html = "";
@@ -159,7 +176,7 @@ async function scrapeSinglePage(page: PlaywrightPage, sourceUrl: string): Promis
       console.warn("Missing reviewer_name or written_date for unique_id generation for a review on:", sourceUrl);
     }
 
-    review.date = new Date().toISOString().substring(0, 10);
+    review.date = formatDateString(review.written_date);
 
     reviews.push(review as Review);
   }
