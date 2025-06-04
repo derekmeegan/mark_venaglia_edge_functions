@@ -222,7 +222,7 @@ serve(async (req: Request) => {
     let allScrapedReviews: Review[] = [];
     let skip = 0;
     let pageNum = 0;
-    const MAX_PAGES = 5; 
+    const MAX_PAGES = 3; 
 
     console.log(`Starting TripAdvisor review scraping process for ${MAX_PAGES} pages.`);
 
